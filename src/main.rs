@@ -55,9 +55,9 @@ fn orchestrator_of(app: &S) -> Option<Arc<Term>> {
 }
 
 /// Monta a linha de comando a rodar no shell para (provider, kind).
-fn build_command(app: &S, prov: &Value, kind: &str, id: &str, bypass: bool, session: &str) -> anyhow::Result<String> {
+fn build_command(app: &S, prov: &Value, kind: &str, id: &str, bypass: bool, session: &str, resume: bool) -> anyhow::Result<String> {
     // O Claude Code grava o transcript estruturado em <sessão>.jsonl: fixar o id deixa o app achar o arquivo certo.
-    let sess = if prov["id"] == "claude" && !session.is_empty() { format!(" --session-id {session}") } else { String::new() };
+    let sess = if prov["id"] == "claude" && !session.is_empty() { format!(" {} {session}", if resume { "--resume" } else { "--session-id" }) } else { String::new() };
     if kind != "orchestrator" {
         let mut c = prov["command"].as_str().unwrap_or("").to_string();
         if bypass {
@@ -122,7 +122,7 @@ pub fn create_term(app: &S, n: NewTerm) -> anyhow::Result<Arc<Term>> {
     };
     if kind != "orchestrator" || cwd != ws.to_string_lossy() { config::touch_recent(&cwd); }
     let session = uuid::Uuid::new_v4().to_string();
-    let command = build_command(app, &prov, &kind, &id, bypass, &session)?;
+    let command = build_command(app, &prov, &kind, &id, bypass, &session, false)?;
     let mut name = n.name.unwrap_or_default();
     if name.is_empty() {
         name = match kind.as_str() { "orchestrator" => "Orquestrador".into(), "agent" => format!("{} {id}", prov["name"].as_str().unwrap_or("agente")), _ => format!("shell {id}") };
@@ -130,6 +130,7 @@ pub fn create_term(app: &S, n: NewTerm) -> anyhow::Result<Arc<Term>> {
     let t = Term::spawn(SpawnReq { id: id.clone(), name, kind, provider, bypass, parent, cwd, session, theme: clean_theme(n.theme.as_deref()), command, env: vec![] }, app.events.clone())?;
     app.terms.lock().unwrap().insert(id, t.clone());
     let _ = app.events.send(json!({"e":"created","term":t.info()}).to_string());
+    persist(app);
     Ok(t)
 }
 
@@ -141,14 +142,56 @@ pub fn switch_provider(app: &S, id: &str, provider: &str) -> anyhow::Result<Arc<
     let kind = if old.kind == "orchestrator" { "orchestrator".to_string() } else if provider == "shell" { "shell".into() } else { "agent".into() };
     let bypass = old.bypass && kind == "agent" && config::load()["orchestrator_can_bypass"] == true && prov["bypass_flag"].as_str().is_some_and(|f| !f.is_empty());
     let session = uuid::Uuid::new_v4().to_string();
-    let command = build_command(app, &prov, &kind, id, bypass, &session)?;
+    let command = build_command(app, &prov, &kind, id, bypass, &session, false)?;
     let name = old.name.lock().unwrap().clone();
     let t = Term::spawn(SpawnReq { id: id.into(), name, kind, provider: provider.into(), bypass, parent: old.parent.clone(), cwd: old.cwd.clone(), session, theme: old.theme.lock().unwrap().clone(), command, env: vec![] }, app.events.clone())?;
     old.replaced.store(true, std::sync::atomic::Ordering::Relaxed);
     app.terms.lock().unwrap().insert(id.into(), t.clone());
     old.kill();
     let _ = app.events.send(json!({"e":"restarted","term":t.info()}).to_string());
+    persist(app);
     Ok(t)
+}
+
+fn chats_file() -> PathBuf { config::data_dir().join("chats.json") }
+
+/// Grava a lista de chats abertos (escrita atômica) para o app recriá-los depois de um reinício.
+pub fn persist(app: &S) {
+    let mut v: Vec<Arc<Term>> = app.terms.lock().unwrap().values().cloned().collect();
+    v.sort_by_key(|t| t.created);
+    let list: Vec<Value> = v.iter().map(|t| json!({
+        "id": t.id, "name": *t.name.lock().unwrap(), "kind": t.kind, "provider": *t.provider.lock().unwrap(),
+        "bypass": t.bypass, "parent": t.parent, "cwd": t.cwd, "theme": *t.theme.lock().unwrap(), "session": *t.session.lock().unwrap(),
+    })).collect();
+    let (f, tmp) = (chats_file(), chats_file().with_extension("json.tmp"));
+    let _ = std::fs::create_dir_all(f.parent().unwrap());
+    if std::fs::write(&tmp, serde_json::to_string_pretty(&list).unwrap_or_default()).is_ok() { let _ = std::fs::rename(&tmp, &f); }
+}
+
+/// Recria os chats salvos (mesmos ids, para a interface reencontrar posição/tamanho). O Claude volta com `--resume`;
+/// as outras IAs reabrem do zero. O orquestrador sobe primeiro: nenhum chat existe sem ele.
+fn restore(app: &S) {
+    let Ok(txt) = std::fs::read_to_string(chats_file()) else { return };
+    let Ok(Value::Array(recs)) = serde_json::from_str::<Value>(&txt) else { return };
+    let cfg = config::load();
+    let ordered = recs.iter().filter(|r| r["kind"] == "orchestrator").chain(recs.iter().filter(|r| r["kind"] != "orchestrator"));
+    if !recs.iter().any(|r| r["kind"] == "orchestrator") { return; }
+    for r in ordered {
+        let (id, provider, kind) = (r["id"].as_str().unwrap_or(""), r["provider"].as_str().unwrap_or(""), r["kind"].as_str().unwrap_or("agent"));
+        let Some(prov) = config::provider(provider) else { continue };
+        if id.is_empty() { continue; }
+        let ws = config::workspace_dir().to_string_lossy().to_string();
+        let cwd = r["cwd"].as_str().filter(|c| std::path::Path::new(c).is_dir()).map(String::from).unwrap_or(ws);
+        let bypass = r["bypass"] == true && kind == "agent" && cfg["orchestrator_can_bypass"] == true && prov["bypass_flag"].as_str().is_some_and(|f| !f.is_empty());
+        let saved = r["session"].as_str().unwrap_or("");
+        let resume = provider == "claude" && !saved.is_empty() && transcript::project_dir(&cwd).is_some_and(|d| d.join(format!("{saved}.jsonl")).exists());
+        let session = if saved.is_empty() || (provider == "claude" && !resume) { uuid::Uuid::new_v4().to_string() } else { saved.to_string() };
+        let command = match build_command(app, &prov, kind, id, bypass, &session, resume) { Ok(c) => c, Err(e) => { eprintln!("restaurar {id}: {e}"); continue } };
+        let name = r["name"].as_str().unwrap_or("chat").to_string();
+        let req = SpawnReq { id: id.into(), name, kind: kind.into(), provider: provider.into(), bypass, parent: r["parent"].as_str().map(String::from), cwd, session, theme: clean_theme(r["theme"].as_str()), command, env: vec![] };
+        match Term::spawn(req, app.events.clone()) { Ok(t) => { app.terms.lock().unwrap().insert(id.into(), t); } Err(e) => eprintln!("restaurar {id}: {e}") }
+    }
+    persist(app);
 }
 
 pub fn get_term(app: &S, id: &str) -> Option<Arc<Term>> {
@@ -161,6 +204,7 @@ pub fn remove_term(app: &S, id: &str) -> bool {
         Some(t) => {
             t.kill();
             let _ = app.events.send(json!({"e":"removed","id":id}).to_string());
+            persist(app);
             if t.kind == "orchestrator" {
                 let kids: Vec<String> = app.terms.lock().unwrap().keys().cloned().collect();
                 for k in kids { remove_term(app, &k); }
@@ -195,6 +239,7 @@ pub fn clean_theme(t: Option<&str>) -> String {
 pub fn set_theme(app: &S, t: &Term, theme: &str) {
     *t.theme.lock().unwrap() = clean_theme(Some(theme));
     let _ = app.events.send(json!({"e":"updated","term":t.info()}).to_string());
+    persist(app);
 }
 
 #[derive(Deserialize)]
@@ -202,7 +247,7 @@ struct Rename { name: Option<String>, theme: Option<String> }
 async fn rename(State(app): State<S>, Path(id): Path<String>, Json(r): Json<Rename>) -> StatusCode {
     match get_term(&app, &id) {
         Some(t) => {
-            if let Some(n) = r.name { *t.name.lock().unwrap() = n; }
+            if let Some(n) = r.name { *t.name.lock().unwrap() = n; persist(&app); }
             if let Some(th) = r.theme { set_theme(&app, &t, &th); }
             StatusCode::NO_CONTENT
         }
@@ -280,8 +325,8 @@ async fn transcript_get(State(app): State<S>, Path(id): Path<String>, axum::extr
     if *t.provider.lock().unwrap() != "claude" {
         return Json(json!({"supported": false, "events": [], "sid": "", "next": 0, "reset": false})).into_response();
     }
-    let claimed: Vec<String> = app.terms.lock().unwrap().values().filter(|o| o.id != t.id).map(|o| o.session.clone()).collect();
-    let (cwd, session, created) = (t.cwd.clone(), t.session.clone(), t.created);
+    let claimed: Vec<String> = app.terms.lock().unwrap().values().filter(|o| o.id != t.id).map(|o| o.session.lock().unwrap().clone()).collect();
+    let (cwd, session, created) = (t.cwd.clone(), t.session.lock().unwrap().clone(), t.created);
     let (sid_in, from_in) = (q.get("sid").cloned().unwrap_or_default(), q.get("from").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0));
     let res = tokio::task::spawn_blocking(move || {
         let Some(path) = transcript::find_file(&cwd, &session, &claimed, created) else { return json!({"supported": true, "events": [], "sid": "", "next": 0, "reset": false}) };
@@ -290,7 +335,17 @@ async fn transcript_get(State(app): State<S>, Path(id): Path<String>, axum::extr
         let (events, next) = transcript::read(&path, if reset { 0 } else { from_in });
         json!({"supported": true, "events": events, "sid": sid, "next": next, "reset": reset})
     }).await;
-    match res { Ok(v) => Json(v).into_response(), Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response() }
+    match res {
+        Ok(v) => {
+            // Se o Claude abriu outra sessão (ex.: /clear), guarda a nova para a retomada depois de um reinício.
+            if let Some(sid) = v["sid"].as_str().filter(|s| !s.is_empty()) {
+                let changed = { let mut g = t.session.lock().unwrap(); if *g != sid { *g = sid.to_string(); true } else { false } };
+                if changed { persist(&app); }
+            }
+            Json(v).into_response()
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 #[derive(Deserialize)]
 struct InputReq { text: String, enter: Option<bool> }
@@ -401,6 +456,7 @@ async fn static_files(uri: Uri) -> Response {
 async fn serve(port: u16, ready: std::sync::mpsc::Sender<Result<(), String>>) {
     let (events, _) = broadcast::channel(256);
     let app: S = Arc::new(App { terms: Mutex::new(HashMap::new()), events, port, data_dir: config::data_dir() });
+    restore(&app);
     let router = Router::new()
         .route("/api/terms", get(list).post(create))
         .route("/api/terms/{id}", axum::routing::delete(delete).patch(rename))
