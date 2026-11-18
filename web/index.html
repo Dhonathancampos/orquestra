@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Orquestra</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='6' fill='%23a78bfa'/><circle cx='16' cy='16' r='13' fill='none' stroke='%23a78bfa' stroke-width='2'/></svg>" />
+</head>
+<body>
+  <header id="bar">
+    <div class="brand"><span class="dot-logo"></span>Orquestra</div>
+    <button data-act="orch" id="b-orch" title="Chat central que controla os outros">◉ Orquestrador</button>
+    <span id="prov-btns"></span>
+    <span class="sep"></span>
+    <button data-act="tile">▦ Organizar</button>
+    <button data-act="center">⌖ Centralizar</button>
+    <span class="zoom"><button data-act="zout" title="Ctrl+scroll ou Ctrl+−">−</button><button data-act="zreset" id="zlabel" title="Ctrl+0">100%</button><button data-act="fit" title="Enquadrar todos os chats na tela">⤢</button><button data-act="zin" title="Ctrl+scroll ou Ctrl++">＋</button></span>
+    <span class="sep"></span>
+    <button data-act="memory" title="Buscar na memória compartilhada (ai-memory)">🧠 Memória</button>
+    <button data-act="config" title="Configurar IAs e atalhos">⚙ IAs</button>
+    <button data-act="palette">⌘K</button>
+    <span class="spacer"></span>
+    <span id="stats"></span>
+    <button id="ver" class="ver" title="Clique para verificar atualizações"></button>
+  </header>
+  <main id="viewport"><div id="canvas"><svg id="links"></svg></div></main>
+  <div id="update" hidden></div>
+  <div id="toasts"></div>
+  <div id="modal" class="modal" hidden><div class="mbox"><div class="mhead"><b id="m-title"></b><button id="m-close">✕</button></div><div id="m-body"></div></div></div>
+  <div id="palette" hidden><div class="pal-box"><input id="pal-input" placeholder="Digite um comando ou nome de terminal…" /><ul id="pal-list"></ul></div></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

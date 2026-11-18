@@ -1,0 +1,6 @@
+target/
+dist/
+stage/
+web/node_modules/
+web/dist/
+*.bak

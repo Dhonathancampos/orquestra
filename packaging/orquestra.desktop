@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Orquestra
+Comment=Orquestrador de terminais para trabalhar com IA
+Exec=__BIN__
+Terminal=false
+Categories=Development;
