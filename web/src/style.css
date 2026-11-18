@@ -146,3 +146,15 @@ body.dr-open{--dw:250px}
 .win{container-type:inline-size}
 @container (max-width:400px){.win header select,.win header .tag.bypass{display:none}.win header{gap:4px;padding:5px 6px}}
 @container (max-width:300px){.win header [data-a=clear],.win header [data-a=size],.win header .tag.theme,.win header [data-a=theme]{display:none}}
+
+.cmeta{padding:4px 14px;font-size:11px;color:var(--dim);border-bottom:1px solid var(--line);background:var(--panel);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.cmeta[hidden]{display:none}
+.m.t details{width:100%;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+.m.t summary{display:flex;align-items:center;gap:8px;padding:5px 10px;cursor:pointer;color:var(--dim);font-size:12px;list-style:none}
+.m.t summary::-webkit-details-marker{display:none}.m.t summary .tn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.m.t summary b{color:var(--fg)}
+.m.t .ti.ok{color:var(--ok)}.m.t .ti.bad{color:var(--bad)}.m.t .ti.spin{color:var(--warn);animation:pulse 1s infinite}
+.m.t details>pre,.m.t details>.diff,.m.t details>ul{margin:0;border-top:1px solid var(--line)}
+.m.t pre.tc2,.m.t pre.to{margin:0;padding:6px 10px;font:12px/1.45 "JetBrains Mono","DejaVu Sans Mono",monospace;white-space:pre-wrap;word-break:break-all;max-height:260px;overflow:auto;color:#aab1c4}
+.m.t pre.tc2{color:var(--fg);background:#0b0d12}.m.t pre.to{border-top:1px solid var(--line)}
+.diff{font:12px/1.45 "JetBrains Mono","DejaVu Sans Mono",monospace;max-height:300px;overflow:auto;padding:4px 0}
+.dl{padding:0 10px;white-space:pre-wrap;word-break:break-all}.dl.add{background:#4ade8018;color:#86efac}.dl.del{background:#f8717118;color:#fca5a5}.dl.sep{color:var(--dim);text-align:center}
+.todos{list-style:none;padding:6px 10px;margin:0}.todos li{padding:1px 0}.todos li.completed{color:var(--ok);text-decoration:line-through}.todos li.in_progress{color:var(--warn)}

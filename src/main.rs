@@ -5,6 +5,7 @@ mod gui;
 mod update;
 mod mcp;
 mod term;
+mod transcript;
 
 use axum::{
     body::Body,
@@ -54,7 +55,9 @@ fn orchestrator_of(app: &S) -> Option<Arc<Term>> {
 }
 
 /// Monta a linha de comando a rodar no shell para (provider, kind).
-fn build_command(app: &S, prov: &Value, kind: &str, id: &str, bypass: bool) -> anyhow::Result<String> {
+fn build_command(app: &S, prov: &Value, kind: &str, id: &str, bypass: bool, session: &str) -> anyhow::Result<String> {
+    // O Claude Code grava o transcript estruturado em <sessão>.jsonl: fixar o id deixa o app achar o arquivo certo.
+    let sess = if prov["id"] == "claude" && !session.is_empty() { format!(" --session-id {session}") } else { String::new() };
     if kind != "orchestrator" {
         let mut c = prov["command"].as_str().unwrap_or("").to_string();
         if bypass {
@@ -62,6 +65,7 @@ fn build_command(app: &S, prov: &Value, kind: &str, id: &str, bypass: bool) -> a
                 .ok_or_else(|| anyhow::anyhow!("a IA \"{}\" não tem `bypass_flag` em providers.json", prov["name"].as_str().unwrap_or("?")))?;
             c = format!("{c} {flag}");
         }
+        if !c.trim().is_empty() { c.push_str(&sess); }
         return Ok(c);
     }
     let tpl = prov["orchestrator_command"].as_str().filter(|c| !c.is_empty())
@@ -73,9 +77,9 @@ fn build_command(app: &S, prov: &Value, kind: &str, id: &str, bypass: bool) -> a
     std::fs::write(&cfg, serde_json::to_string(&json!({"mcpServers":{"orq":{"type":"http","url":url}}}))?)?;
     let prompt = dir.join("orchestrator-prompt.md");
     std::fs::write(&prompt, include_str!("orchestrator-prompt.md"))?;
-    Ok(tpl.replace("{mcp_config}", &format!("\"{}\"", cfg.display()))
+    Ok(format!("{}{sess}", tpl.replace("{mcp_config}", &format!("\"{}\"", cfg.display()))
         .replace("{prompt_file}", &format!("\"{}\"", prompt.display()))
-        .replace("{mcp_url}", &url))
+        .replace("{mcp_url}", &url)))
 }
 
 pub fn create_term(app: &S, n: NewTerm) -> anyhow::Result<Arc<Term>> {
@@ -117,12 +121,13 @@ pub fn create_term(app: &S, n: NewTerm) -> anyhow::Result<Arc<Term>> {
         None => ws.to_string_lossy().to_string(),
     };
     if kind != "orchestrator" || cwd != ws.to_string_lossy() { config::touch_recent(&cwd); }
-    let command = build_command(app, &prov, &kind, &id, bypass)?;
+    let session = uuid::Uuid::new_v4().to_string();
+    let command = build_command(app, &prov, &kind, &id, bypass, &session)?;
     let mut name = n.name.unwrap_or_default();
     if name.is_empty() {
         name = match kind.as_str() { "orchestrator" => "Orquestrador".into(), "agent" => format!("{} {id}", prov["name"].as_str().unwrap_or("agente")), _ => format!("shell {id}") };
     }
-    let t = Term::spawn(SpawnReq { id: id.clone(), name, kind, provider, bypass, parent, cwd, theme: clean_theme(n.theme.as_deref()), command, env: vec![] }, app.events.clone())?;
+    let t = Term::spawn(SpawnReq { id: id.clone(), name, kind, provider, bypass, parent, cwd, session, theme: clean_theme(n.theme.as_deref()), command, env: vec![] }, app.events.clone())?;
     app.terms.lock().unwrap().insert(id, t.clone());
     let _ = app.events.send(json!({"e":"created","term":t.info()}).to_string());
     Ok(t)
@@ -135,9 +140,10 @@ pub fn switch_provider(app: &S, id: &str, provider: &str) -> anyhow::Result<Arc<
     if old.kind == "orchestrator" && provider == "shell" { anyhow::bail!("o orquestrador precisa ser uma IA"); }
     let kind = if old.kind == "orchestrator" { "orchestrator".to_string() } else if provider == "shell" { "shell".into() } else { "agent".into() };
     let bypass = old.bypass && kind == "agent" && config::load()["orchestrator_can_bypass"] == true && prov["bypass_flag"].as_str().is_some_and(|f| !f.is_empty());
-    let command = build_command(app, &prov, &kind, id, bypass)?;
+    let session = uuid::Uuid::new_v4().to_string();
+    let command = build_command(app, &prov, &kind, id, bypass, &session)?;
     let name = old.name.lock().unwrap().clone();
-    let t = Term::spawn(SpawnReq { id: id.into(), name, kind, provider: provider.into(), bypass, parent: old.parent.clone(), cwd: old.cwd.clone(), theme: old.theme.lock().unwrap().clone(), command, env: vec![] }, app.events.clone())?;
+    let t = Term::spawn(SpawnReq { id: id.into(), name, kind, provider: provider.into(), bypass, parent: old.parent.clone(), cwd: old.cwd.clone(), session, theme: old.theme.lock().unwrap().clone(), command, env: vec![] }, app.events.clone())?;
     old.replaced.store(true, std::sync::atomic::Ordering::Relaxed);
     app.terms.lock().unwrap().insert(id.into(), t.clone());
     old.kill();
@@ -268,6 +274,24 @@ async fn screen_get(State(app): State<S>, Path(id): Path<String>, axum::extract:
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
+/// Eventos estruturados do chat (transcript do Claude Code). `sid` + `from` = cursor devolvido na chamada anterior.
+async fn transcript_get(State(app): State<S>, Path(id): Path<String>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>) -> Response {
+    let Some(t) = get_term(&app, &id) else { return StatusCode::NOT_FOUND.into_response() };
+    if *t.provider.lock().unwrap() != "claude" {
+        return Json(json!({"supported": false, "events": [], "sid": "", "next": 0, "reset": false})).into_response();
+    }
+    let claimed: Vec<String> = app.terms.lock().unwrap().values().filter(|o| o.id != t.id).map(|o| o.session.clone()).collect();
+    let (cwd, session, created) = (t.cwd.clone(), t.session.clone(), t.created);
+    let (sid_in, from_in) = (q.get("sid").cloned().unwrap_or_default(), q.get("from").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0));
+    let res = tokio::task::spawn_blocking(move || {
+        let Some(path) = transcript::find_file(&cwd, &session, &claimed, created) else { return json!({"supported": true, "events": [], "sid": "", "next": 0, "reset": false}) };
+        let sid = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let reset = sid != sid_in;
+        let (events, next) = transcript::read(&path, if reset { 0 } else { from_in });
+        json!({"supported": true, "events": events, "sid": sid, "next": next, "reset": reset})
+    }).await;
+    match res { Ok(v) => Json(v).into_response(), Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response() }
+}
 #[derive(Deserialize)]
 struct InputReq { text: String, enter: Option<bool> }
 async fn input_post(State(app): State<S>, Path(id): Path<String>, Json(r): Json<InputReq>) -> StatusCode {
@@ -388,6 +412,7 @@ async fn serve(port: u16, ready: std::sync::mpsc::Sender<Result<(), String>>) {
         .route("/api/terms/{id}/provider", post(switch))
         .route("/api/memory", get(memory))
         .route("/api/terms/{id}/screen", get(screen_get))
+        .route("/api/terms/{id}/transcript", get(transcript_get))
         .route("/api/terms/{id}/input", post(input_post))
         .route("/api/dirs", get(dirs_get).post(dirs_post))
         .route("/ws/term/{id}", get(ws_term))

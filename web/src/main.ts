@@ -201,7 +201,7 @@ function addWin(info: Info) {
   if (wins.has(info.id)) return
   const el = document.createElement('section')
   el.className = 'win' + (info.kind === 'orchestrator' ? ' orch' : '')
-  el.innerHTML = `<header><span class="st"></span><span class="title"></span><span class="tag theme" title="Tema (clique para mudar)" hidden></span><span class="tag bypass" title="Este chat roda sem pedir confirmação de permissões" hidden>⚡ bypass</span><select title="Trocar a IA deste chat (reinicia a conversa)"></select><button data-a="view" title="Alternar entre visão de terminal e visão de chat">💬</button><button data-a="theme" title="Definir tema (agrupa chats do mesmo assunto)">🏷</button><button data-a="clear" title="Limpar contexto com checkpoint (salva na memória, limpa e retoma)">🧹</button><button data-a="size" title="Tamanho do chat: alterna pequeno → médio → grande (ou arraste as bordas/canto)">⤡</button><button data-a="max" title="Maximizar">▢</button><button data-a="close" title="Fechar">✕</button></header><div class="body"></div><div class="chatv"><div class="msgs"></div><button class="jump" hidden>↓ Novas mensagens</button><div class="perm" hidden></div><div class="cin"><textarea rows="1" placeholder="Mensagem… (Enter envia · Shift+Enter nova linha)" spellcheck="false"></textarea><div class="cbtns"><button class="pri" data-c="send" title="Enviar (Enter)">Enviar ➤</button><button data-c="esc" title="Enviar Esc: interrompe a IA / volta">Esc</button><button data-c="int" title="Enviar Ctrl+C">^C</button></div></div></div></div><i class="rz rz-e" data-rz="e" title="Arraste para alargar"></i><i class="rz rz-s" data-rz="s" title="Arraste para aumentar a altura"></i><i class="rz rz-se" data-rz="se" title="Arraste para redimensionar"></i>`
+  el.innerHTML = `<header><span class="st"></span><span class="title"></span><span class="tag theme" title="Tema (clique para mudar)" hidden></span><span class="tag bypass" title="Este chat roda sem pedir confirmação de permissões" hidden>⚡ bypass</span><select title="Trocar a IA deste chat (reinicia a conversa)"></select><button data-a="view" title="Alternar entre visão de terminal e visão de chat">💬</button><button data-a="theme" title="Definir tema (agrupa chats do mesmo assunto)">🏷</button><button data-a="clear" title="Limpar contexto com checkpoint (salva na memória, limpa e retoma)">🧹</button><button data-a="size" title="Tamanho do chat: alterna pequeno → médio → grande (ou arraste as bordas/canto)">⤡</button><button data-a="max" title="Maximizar">▢</button><button data-a="close" title="Fechar">✕</button></header><div class="body"></div><div class="chatv"><div class="cmeta" hidden></div><div class="msgs"></div><button class="jump" hidden>↓ Novas mensagens</button><div class="perm" hidden></div><div class="cin"><textarea rows="1" placeholder="Mensagem… (Enter envia · Shift+Enter nova linha)" spellcheck="false"></textarea><div class="cbtns"><button class="pri" data-c="send" title="Enviar (Enter)">Enviar ➤</button><button data-c="esc" title="Enviar Esc: interrompe a IA / volta">Esc</button><button data-c="int" title="Enviar Ctrl+C">^C</button></div></div></div></div><i class="rz rz-e" data-rz="e" title="Arraste para alargar"></i><i class="rz rz-s" data-rz="s" title="Arraste para aumentar a altura"></i><i class="rz rz-se" data-rz="se" title="Arraste para redimensionar"></i>`
   const dot = el.querySelector('.st') as HTMLElement, title = el.querySelector('.title') as HTMLElement
   const sel = el.querySelector('select') as HTMLSelectElement
   title.textContent = info.name
@@ -476,13 +476,87 @@ const mdHtml = (src: string) => src.split('```').map((p, i) => i % 2 ? codeBlock
 const copyText = (t: string) => { try { navigator.clipboard.writeText(t).catch(() => legacyCopy(t)) } catch { legacyCopy(t) } }
 const legacyCopy = (t: string) => { const a = document.createElement('textarea'); a.value = t; document.body.appendChild(a); a.select(); try { document.execCommand('copy') } catch {} a.remove() }
 
+
+// ---------- chat estruturado (transcript do Claude Code) ----------
+type Ev = { k: string; [x: string]: any }
+type Item = { t: 'user' | 'ai' | 'think' | 'tool'; text?: string; name?: string; input?: any; out?: string; err?: boolean; done?: boolean }
+function buildItems(evs: Ev[]): Item[] {
+  const items: Item[] = [], byId = new Map<string, Item>()
+  for (const e of evs) {
+    const last = items[items.length - 1]
+    if (e.k === 'user') items.push({ t: 'user', text: e.text })
+    else if (e.k === 'text') { if (last?.t === 'ai') last.text += '\n\n' + e.text; else items.push({ t: 'ai', text: e.text }) }
+    else if (e.k === 'thinking') items.push({ t: 'think', text: e.text })
+    else if (e.k === 'tool') { const it: Item = { t: 'tool', name: e.name, input: e.input || {} }; items.push(it); byId.set(e.id, it) }
+    else if (e.k === 'result') { const it = byId.get(e.id); if (it) { it.out = e.text; it.err = !!e.err; it.done = true } }
+  }
+  return items
+}
+const lastLines = (t: string, n: number) => { const l = t.split('\n'); return l.length > n ? l.slice(-n).join('\n') : t }
+function diffHtml(oldS: string, newS: string) {
+  const a = oldS.split('\n'), b = newS.split('\n'); let i = 0
+  while (i < a.length && i < b.length && a[i] === b[i]) i++
+  let j = 0
+  while (j < a.length - i && j < b.length - i && a[a.length - 1 - j] === b[b.length - 1 - j]) j++
+  const del = a.slice(i, a.length - j), add = b.slice(i, b.length - j)
+  return del.map(l => `<div class="dl del">- ${escH(l)}</div>`).join('') + add.map(l => `<div class="dl add">+ ${escH(l)}</div>`).join('')
+}
+function toolView(it: Item): { sum: string; body: string } {
+  const n = it.name || 'ferramenta', inp = it.input || {}
+  const path = inp.file_path || inp.path || inp.notebook_path || ''
+  const short = (s: string) => escH(String(s).length > 90 ? String(s).slice(0, 90) + '…' : String(s))
+  const out = it.out ? `<pre class="to">${escH(it.out)}</pre>` : ''
+  if (n === 'Bash') return { sum: `<b>Bash</b> ${short(inp.description || String(inp.command || '').split('\n')[0])}`, body: `<pre class="tc2">$ ${escH(inp.command || '')}</pre>${out}` }
+  if (n === 'Edit') return { sum: `<b>Edit</b> ${short(path)}`, body: `<div class="diff">${diffHtml(String(inp.old_string ?? ''), String(inp.new_string ?? ''))}</div>${it.err ? out : ''}` }
+  if (n === 'MultiEdit') return { sum: `<b>Edit</b> ${short(path)} <span class="tc">${(inp.edits || []).length} trechos</span>`, body: `<div class="diff">${(inp.edits || []).map((x: any) => diffHtml(String(x.old_string ?? ''), String(x.new_string ?? ''))).join('<div class="dl sep">⋯</div>')}</div>${it.err ? out : ''}` }
+  if (n === 'Write') return { sum: `<b>Write</b> ${short(path)}`, body: `<div class="diff">${String(inp.content ?? '').split('\n').slice(0, 60).map(l => `<div class="dl add">+ ${escH(l)}</div>`).join('')}</div>${it.err ? out : ''}` }
+  if (n === 'Read') return { sum: `<b>Read</b> ${short(path)}`, body: out }
+  if (n === 'Grep' || n === 'Glob') return { sum: `<b>${n}</b> ${short(inp.pattern || '')} <span class="tc">${short(inp.path || '')}</span>`, body: out }
+  if (n === 'TodoWrite') return { sum: `<b>Tarefas</b> <span class="tc">${(inp.todos || []).length} itens</span>`, body: `<ul class="todos">${(inp.todos || []).map((x: any) => `<li class="${escH(x.status || '')}">${escH(x.content || '')}</li>`).join('')}</ul>` }
+  const j = JSON.stringify(inp)
+  return { sum: `<b>${escH(n.replace(/^mcp__/, '').replace(/__/g, ' › '))}</b> <span class="tc">${short(j.length > 2 ? j : '')}</span>`, body: `<pre class="tc2">${escH(lastLines(JSON.stringify(inp, null, 2), 40))}</pre>${out}` }
+}
+function structHtml(items: Item[], av: string, opened: Set<number>) {
+  let h = ''
+  items.forEach((m, i) => {
+    if (m.t === 'user') h += `<div class="m u"><div class="b">${mdHtml(m.text || '')}</div></div>`
+    else if (m.t === 'ai') h += `<div class="m a"><div class="av">${av}</div><div class="b">${mdHtml(m.text || '')}<button class="cp" data-copymsg="${i}" title="Copiar mensagem">⧉</button></div></div>`
+    else if (m.t === 'think') h += `<div class="m t"><details data-k="${i}"${opened.has(i) ? ' open' : ''}><summary><span class="ti">💭</span><span class="tn">Pensamento</span></summary><pre>${escH(m.text || '')}</pre></details></div>`
+    else {
+      const v = toolView(m), st = !m.done ? '<span class="ti spin">◌</span>' : m.err ? '<span class="ti bad">✗</span>' : '<span class="ti ok">✓</span>'
+      h += `<div class="m t"><details data-k="${i}"${opened.has(i) ? ' open' : ''}><summary>${st}<span class="tn">${v.sum}</span></summary>${v.body}</details></div>`
+    }
+  })
+  return h
+}
+
 function setupChat(w: Win) {
   const el = w.el, box = el.querySelector('.msgs') as HTMLElement, ta = el.querySelector('.chatv textarea') as HTMLTextAreaElement
   const btn = el.querySelector('[data-a=view]') as HTMLButtonElement, jump = el.querySelector('.jump') as HTMLButtonElement, permEl = el.querySelector('.perm') as HTMLElement
   const opened = new Set<number>(); let lastRaw = '\u0000', stick = true
+  let evs: Ev[] = [], tsid = '', tfrom = 0, structured = false, tmeta = { title: '', model: '', usd: 0 }
+  const metaEl = el.querySelector('.cmeta') as HTMLElement
   const sendRaw = (text: string, enter: boolean) => api(`/api/terms/${w.info.id}/input`, { method: 'POST', body: JSON.stringify({ text, enter }) }).then(() => setTimeout(refresh, 250)).catch(e => toast('Erro: ' + e))
   const render = (raw: string) => {
     const { msgs, status, perm } = parseChat(raw), working = w.state === 'working' || !!status
+    if (structured) {
+      const items = buildItems(evs), av = escH(provName(w.info.provider).slice(0, 1).toUpperCase())
+      let h = items.length ? structHtml(items, av, opened) : '<div class="empty">Sem mensagens ainda. Escreva abaixo para começar.</div>'
+      if (working) h += `<div class="m a"><div class="av">${av}</div><div class="b typing"><i></i><i></i><i></i><span>${escH(status || 'trabalhando…')}</span></div></div>`
+      const prevTop = box.scrollTop
+      box.innerHTML = h; (box as any)._msgs = items
+      box.scrollTop = stick ? box.scrollHeight : prevTop
+      jump.hidden = stick || box.scrollHeight - box.scrollTop - box.clientHeight < 30
+      const bits = [tmeta.title, tmeta.model, tmeta.usd ? '$' + tmeta.usd.toFixed(2) : ''].filter(Boolean)
+      metaEl.hidden = !bits.length; metaEl.textContent = bits.join(' · ')
+      if (perm) {
+        permEl.hidden = false
+        permEl.innerHTML = `<div class="pq">⚠ ${escH(perm.question)}</div><div class="po">${perm.options.map((o, i) => `<button data-o="${i}" class="${i === 0 ? 'pri' : ''}">${escH(o.key.length === 1 && /\d/.test(o.key) ? o.key + '. ' : '')}${escH(o.label.slice(0, 60))}</button>`).join('')}<button data-esc>Esc</button></div>`
+        ;(permEl as any)._perm = perm
+      } else { permEl.hidden = true; permEl.innerHTML = '' }
+      return
+    }
+    metaEl.hidden = true
     const dialog = msgs.some(m => m.role !== 'raw')
     let html = ''
     if (!msgs.length && !working) html = '<div class="empty">Sem mensagens ainda. Escreva abaixo para começar.</div>'
@@ -511,7 +585,18 @@ function setupChat(w: Win) {
   const refresh = async () => {
     try {
       const r = await api(`/api/terms/${w.info.id}/screen?full=1`)
-      const key = r.text + '|' + w.state
+      let tn = evs.length
+      try {
+        const t = await api(`/api/terms/${w.info.id}/transcript?sid=${encodeURIComponent(tsid)}&from=${tfrom}`)
+        if (t.supported && t.sid) {
+          if (t.reset) { evs = []; tmeta = { title: '', model: '', usd: 0 } }
+          for (const e of t.events as Ev[]) {
+            if (e.k === 'title') tmeta.title = e.text; else if (e.k === 'model') tmeta.model = e.text; else if (e.k === 'cost') tmeta.usd = Number(e.usd) || 0; else evs.push(e)
+          }
+          tsid = t.sid; tfrom = t.next; structured = true; tn = evs.length + (t.events as Ev[]).length
+        } else structured = false
+      } catch { structured = false }
+      const key = r.text + '|' + w.state + '|' + tn + '|' + tmeta.usd + tmeta.title + '|' + structured
       if (key !== lastRaw) { lastRaw = key; render(r.text) }
     } catch {}
   }
