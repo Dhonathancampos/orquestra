@@ -194,3 +194,42 @@ pub async fn save_checkpoint(slug: &str, title: &str, body: &str, cwd: &str) -> 
         .map_err(|_| "timeout".to_string())?.map_err(|e| e.to_string())?;
     if out.status.success() { Ok(path) } else { Err(String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("erro").to_string()) }
 }
+
+// ---------- histórico de projetos (pastas) ----------
+fn dirs_file() -> PathBuf { data_dir().join("dirs.json") }
+
+/// {"recent":[{"path","last","count"}], "favorites":["path"]}
+pub fn load_dirs() -> Value {
+    std::fs::read_to_string(dirs_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({"recent":[],"favorites":[]}))
+}
+fn save_dirs(v: &Value) {
+    let _ = std::fs::create_dir_all(data_dir());
+    let tmp = dirs_file().with_extension("tmp");
+    if std::fs::write(&tmp, serde_json::to_string_pretty(v).unwrap_or_default()).is_ok() { let _ = std::fs::rename(&tmp, dirs_file()); }
+}
+pub fn touch_recent(path: &str) {
+    let mut v = load_dirs();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let mut list: Vec<Value> = v["recent"].as_array().cloned().unwrap_or_default();
+    let count = list.iter().find(|e| e["path"] == path).and_then(|e| e["count"].as_u64()).unwrap_or(0) + 1;
+    list.retain(|e| e["path"] != path);
+    list.insert(0, json!({"path": path, "last": now, "count": count}));
+    list.truncate(30);
+    v["recent"] = json!(list);
+    save_dirs(&v);
+}
+pub fn set_favorite(path: &str, on: bool) {
+    let mut v = load_dirs();
+    let mut f: Vec<Value> = v["favorites"].as_array().cloned().unwrap_or_default();
+    f.retain(|e| e != path);
+    if on { f.push(json!(path)); }
+    v["favorites"] = json!(f);
+    save_dirs(&v);
+}
+pub fn forget_recent(path: &str) {
+    let mut v = load_dirs();
+    let mut list: Vec<Value> = v["recent"].as_array().cloned().unwrap_or_default();
+    list.retain(|e| e["path"] != path);
+    v["recent"] = json!(list);
+    save_dirs(&v);
+}

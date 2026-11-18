@@ -11,7 +11,9 @@ fn tools() -> Value {
          "bypass":{"type":"boolean","description":"Abrir com bypass de permissões (sem pedir confirmação a cada ação). Só funciona se o usuário ativou orchestrator_can_bypass; use apenas quando o usuário pedir ou a tarefa for claramente segura e isolada."},
          "memory":{"type":"boolean","description":"Anexar ao prompt o contexto relevante da memória compartilhada (ai-memory). Padrão: conforme configuração."},
          "cwd":{"type":"string","description":"Diretório de trabalho (aceita ~). Padrão: a pasta de trabalho segura do Orquestra, já confiável. Outra pasta pode disparar o pedido de confiança do Claude."},
+         "theme":{"type":"string","description":"Tema/assunto do chat (ex.: \"login\", \"relatório\"). Chats com o mesmo tema ficam agrupados juntos num contorno na tela; use o mesmo texto para tarefas do mesmo assunto."},
          "prompt":{"type":"string","description":"Primeira instrução enviada ao agente"}},"required":["name"]}},
+      {"name":"set_theme","description":"Define (ou limpa, com texto vazio) o tema de um terminal já aberto, para agrupá-lo com os do mesmo assunto.","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"theme":{"type":"string"}},"required":["id","theme"]}},
       {"name":"send_input","description":"Envia texto a um terminal (e Enter por padrão).","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"enter":{"type":"boolean"}},"required":["id","text"]}},
       {"name":"read_output","description":"Lê o que um terminal mostra. mode=screen (padrão): tela atual renderizada; mode=tail: últimas N linhas de histórico sem escapes.","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"mode":{"type":"string","enum":["screen","tail"]},"lines":{"type":"integer"}},"required":["id"]}},
       {"name":"wait_idle","description":"Espera o terminal ficar sem saída por `quiet_s` segundos (padrão 4) ou estourar `timeout_s` (padrão 120). Use para esperar um agente terminar.","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"quiet_s":{"type":"number"},"timeout_s":{"type":"number"}},"required":["id"]}},
@@ -43,6 +45,8 @@ async fn call(app: &S, orch: &str, name: &str, a: &Value) -> Value {
                 parent: Some(orch.to_string()),
                 cwd: a["cwd"].as_str().map(String::from),
                 command: None,
+                trust: None,
+                theme: a["theme"].as_str().map(String::from),
             };
             match create_term(app, nt) {
                 Ok(t) => {
@@ -55,7 +59,9 @@ async fn call(app: &S, orch: &str, name: &str, a: &Value) -> Value {
                         }
                         let t2 = t.clone();
                         tokio::spawn(async move {
-                            t2.wait_idle(1500, 25_000).await;
+                            // a IA leva alguns segundos para subir; antes disso o prompt cairia no shell
+                            tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+                            t2.wait_idle(2000, 30_000).await;
                             t2.send_line(&prompt, true).await;
                         });
                     }
@@ -64,6 +70,10 @@ async fn call(app: &S, orch: &str, name: &str, a: &Value) -> Value {
                 Err(e) => text(format!("erro: {e}"), true),
             }
         }
+        "set_theme" => match get_term(app, id) {
+            Some(t) => { crate::set_theme(app, &t, a["theme"].as_str().unwrap_or("")); text("tema definido", false) }
+            None => text("terminal não encontrado", true),
+        },
         "clear_context" => match get_term(app, id) {
             Some(t) if t.kind == "orchestrator" => text("o orquestrador não pode se limpar por ferramenta: peça ao usuário para usar o botão 🧹 da sua janela", true),
             Some(t) => match clear::smart_clear(app, &t).await { Ok(m) => text(m, false), Err(e) => text(format!("erro: {e}"), true) },

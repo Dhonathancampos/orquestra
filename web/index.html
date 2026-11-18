@@ -8,13 +8,16 @@
 </head>
 <body>
   <header id="bar">
+    <button data-act="drawer" id="b-drawer" title="Lista de chats e projetos (Ctrl+B)">☰</button>
     <div class="brand"><span class="dot-logo"></span>Orquestra</div>
     <button data-act="orch" id="b-orch" title="Chat central que controla os outros">◉ Orquestrador</button>
     <span id="prov-btns"></span>
+    <button data-act="newin" title="Abrir um novo chat escolhendo a pasta de início">📁 Em pasta…</button>
     <span class="sep"></span>
-    <button data-act="tile">▦ Organizar</button>
+    <button data-act="tile" title="Orquestrador no centro, cada tema em um bloco ao redor, sem sobreposição">▦ Organizar</button>
     <button data-act="center">⌖ Centralizar</button>
     <span class="zoom"><button data-act="zout" title="Ctrl+scroll ou Ctrl+−">−</button><button data-act="zreset" id="zlabel" title="Ctrl+0">100%</button><button data-act="fit" title="Enquadrar todos os chats na tela">⤢</button><button data-act="zin" title="Ctrl+scroll ou Ctrl++">＋</button></span>
+    <span class="fsz" title="Tamanho da letra dos terminais (Ctrl+Shift+= / Ctrl+Shift+−)"><button data-act="fout">A−</button><button data-act="freset" id="flabel">100%</button><button data-act="fin">A＋</button></span>
     <span class="sep"></span>
     <button data-act="memory" title="Buscar na memória compartilhada (ai-memory)">🧠 Memória</button>
     <button data-act="config" title="Configurar IAs e atalhos">⚙ IAs</button>
@@ -23,6 +26,7 @@
     <span id="stats"></span>
     <button id="ver" class="ver" title="Clique para verificar atualizações"></button>
   </header>
+  <aside id="drawer"><div id="dr-chats"></div><div id="dr-projects"></div></aside>
   <main id="viewport"><div id="canvas"><svg id="links"></svg></div></main>
   <div id="update" hidden></div>
   <div id="toasts"></div>

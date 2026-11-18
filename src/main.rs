@@ -43,6 +43,10 @@ pub struct NewTerm {
     pub parent: Option<String>,
     pub cwd: Option<String>,
     pub command: Option<String>,
+    /// Marcar a pasta escolhida (fora do workspace) como confiável no Claude Code.
+    pub trust: Option<bool>,
+    /// Tema/assunto do chat (agrupa chats relacionados na tela).
+    pub theme: Option<String>,
 }
 
 fn orchestrator_of(app: &S) -> Option<Arc<Term>> {
@@ -98,13 +102,27 @@ pub fn create_term(app: &S, n: NewTerm) -> anyhow::Result<Arc<Term>> {
     if cfg["auto_trust_workspace"] != false {
         if let Err(e) = config::ensure_trusted(&ws) { eprintln!("aviso: não consegui marcar {} como confiável: {e}", ws.display()); }
     }
-    let cwd = n.cwd.filter(|c| !c.is_empty()).map(|c| config::expand(&c)).unwrap_or_else(|| ws.to_string_lossy().to_string());
+    let custom = n.cwd.filter(|c| !c.trim().is_empty()).map(|c| config::expand(c.trim()));
+    let cwd = match custom {
+        Some(c) => {
+            let p = std::path::Path::new(&c);
+            if !p.is_dir() { anyhow::bail!("a pasta \"{c}\" não existe ou não é um diretório"); }
+            let canon = std::fs::canonicalize(p).unwrap_or(p.to_path_buf());
+            let canon = canon.to_string_lossy().trim_start_matches("\\\\?\\").to_string();
+            if n.trust == Some(true) {
+                if let Err(e) = config::ensure_trusted(std::path::Path::new(&canon)) { eprintln!("aviso: não consegui confiar em {canon}: {e}"); }
+            }
+            canon
+        }
+        None => ws.to_string_lossy().to_string(),
+    };
+    if kind != "orchestrator" || cwd != ws.to_string_lossy() { config::touch_recent(&cwd); }
     let command = build_command(app, &prov, &kind, &id, bypass)?;
     let mut name = n.name.unwrap_or_default();
     if name.is_empty() {
         name = match kind.as_str() { "orchestrator" => "Orquestrador".into(), "agent" => format!("{} {id}", prov["name"].as_str().unwrap_or("agente")), _ => format!("shell {id}") };
     }
-    let t = Term::spawn(SpawnReq { id: id.clone(), name, kind, provider, bypass, parent, cwd, command, env: vec![] }, app.events.clone())?;
+    let t = Term::spawn(SpawnReq { id: id.clone(), name, kind, provider, bypass, parent, cwd, theme: clean_theme(n.theme.as_deref()), command, env: vec![] }, app.events.clone())?;
     app.terms.lock().unwrap().insert(id, t.clone());
     let _ = app.events.send(json!({"e":"created","term":t.info()}).to_string());
     Ok(t)
@@ -119,7 +137,7 @@ pub fn switch_provider(app: &S, id: &str, provider: &str) -> anyhow::Result<Arc<
     let bypass = old.bypass && kind == "agent" && config::load()["orchestrator_can_bypass"] == true && prov["bypass_flag"].as_str().is_some_and(|f| !f.is_empty());
     let command = build_command(app, &prov, &kind, id, bypass)?;
     let name = old.name.lock().unwrap().clone();
-    let t = Term::spawn(SpawnReq { id: id.into(), name, kind, provider: provider.into(), bypass, parent: old.parent.clone(), cwd: old.cwd.clone(), command, env: vec![] }, app.events.clone())?;
+    let t = Term::spawn(SpawnReq { id: id.into(), name, kind, provider: provider.into(), bypass, parent: old.parent.clone(), cwd: old.cwd.clone(), theme: old.theme.lock().unwrap().clone(), command, env: vec![] }, app.events.clone())?;
     old.replaced.store(true, std::sync::atomic::Ordering::Relaxed);
     app.terms.lock().unwrap().insert(id.into(), t.clone());
     old.kill();
@@ -164,11 +182,24 @@ async fn delete(State(app): State<S>, Path(id): Path<String>) -> StatusCode {
     if remove_term(&app, &id) { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }
 }
 
+pub fn clean_theme(t: Option<&str>) -> String {
+    t.unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ").chars().take(40).collect()
+}
+/// Define o tema e avisa a interface.
+pub fn set_theme(app: &S, t: &Term, theme: &str) {
+    *t.theme.lock().unwrap() = clean_theme(Some(theme));
+    let _ = app.events.send(json!({"e":"updated","term":t.info()}).to_string());
+}
+
 #[derive(Deserialize)]
-struct Rename { name: String }
+struct Rename { name: Option<String>, theme: Option<String> }
 async fn rename(State(app): State<S>, Path(id): Path<String>, Json(r): Json<Rename>) -> StatusCode {
     match get_term(&app, &id) {
-        Some(t) => { *t.name.lock().unwrap() = r.name; StatusCode::NO_CONTENT }
+        Some(t) => {
+            if let Some(n) = r.name { *t.name.lock().unwrap() = n; }
+            if let Some(th) = r.theme { set_theme(&app, &t, &th); }
+            StatusCode::NO_CONTENT
+        }
         None => StatusCode::NOT_FOUND,
     }
 }
@@ -214,6 +245,38 @@ async fn memory(axum::extract::Query(q): axum::extract::Query<MemQ>) -> Json<Val
     Json(Value::Array(config::recall(&q.q, &cwd, 8).await))
 }
 
+async fn dirs_get() -> Json<Value> {
+    let mut v = config::load_dirs();
+    v["workspace"] = json!(config::workspace_dir().to_string_lossy());
+    Json(v)
+}
+#[derive(Deserialize)]
+struct DirReq { path: String, favorite: Option<bool>, forget: Option<bool> }
+async fn dirs_post(Json(r): Json<DirReq>) -> Json<Value> {
+    let path = config::expand(r.path.trim());
+    if let Some(f) = r.favorite { config::set_favorite(&path, f); }
+    if r.forget == Some(true) { config::forget_recent(&path); }
+    dirs_get().await
+}
+
+async fn screen_get(State(app): State<S>, Path(id): Path<String>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>) -> Response {
+    match get_term(&app, &id) {
+        Some(t) => {
+            let text = if q.contains_key("full") { t.screen_full() } else { t.screen() };
+            Json(json!({"text": text, "state": t.state()})).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+#[derive(Deserialize)]
+struct InputReq { text: String, enter: Option<bool> }
+async fn input_post(State(app): State<S>, Path(id): Path<String>, Json(r): Json<InputReq>) -> StatusCode {
+    match get_term(&app, &id) {
+        Some(t) => { t.send_line(&r.text, r.enter.unwrap_or(true)).await; StatusCode::NO_CONTENT }
+        None => StatusCode::NOT_FOUND,
+    }
+}
+
 async fn ws_term(State(app): State<S>, Path(id): Path<String>, ws: WebSocketUpgrade) -> Response {
     let Some(t) = get_term(&app, &id) else { return StatusCode::NOT_FOUND.into_response() };
     ws.on_upgrade(move |sock| term_socket(sock, t))
@@ -227,7 +290,15 @@ async fn term_socket(mut sock: WebSocket, t: Arc<Term>) {
         tokio::select! {
             out = async { match rx.as_mut() { Some(r) => r.recv().await, None => std::future::pending().await } } => match out {
                 Ok(b) => { if sock.send(Message::Binary(b.into())).await.is_err() { break; } }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                // Perdeu bytes (cliente lento): reenvia a tela inteira para não ficar desincronizado/"travado".
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let snap = {
+                        let g = t.inner.lock().unwrap();
+                        rx = Some(t.tx.subscribe());
+                        format!("\x1bc{}", g.parser.screen().state_formatted()).into_bytes()
+                    };
+                    if sock.send(Message::Binary(snap.into())).await.is_err() { break; }
+                }
                 Err(_) => break,
             },
             msg = sock.recv() => match msg {
@@ -267,7 +338,7 @@ async fn ws_events(State(app): State<S>, ws: WebSocketUpgrade) -> Response {
                     Err(_) => break,
                 },
                 _ = tick.tick() => {
-                    let st: Vec<Value> = app.terms.lock().unwrap().values().map(|t| json!({"id":t.id,"state":t.state()})).collect();
+                    let st: Vec<Value> = app.terms.lock().unwrap().values().map(|t| json!({"id":t.id,"state":t.state(),"idle_ms":t.idle_ms()})).collect();
                     if sock.send(Message::Text(json!({"e":"states","states":st}).to_string().into())).await.is_err() { break; }
                 }
                 m = sock.recv() => { if !matches!(m, Some(Ok(_))) { break; } }
@@ -316,6 +387,9 @@ async fn serve(port: u16, ready: std::sync::mpsc::Sender<Result<(), String>>) {
         .route("/api/terms/{id}/clear", post(clear))
         .route("/api/terms/{id}/provider", post(switch))
         .route("/api/memory", get(memory))
+        .route("/api/terms/{id}/screen", get(screen_get))
+        .route("/api/terms/{id}/input", post(input_post))
+        .route("/api/dirs", get(dirs_get).post(dirs_post))
         .route("/ws/term/{id}", get(ws_term))
         .route("/ws/events", get(ws_events))
         .route("/mcp/{orch}", post(mcp::handle))
